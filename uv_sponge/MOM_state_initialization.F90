@@ -31,7 +31,7 @@ use MOM_grid_initialize, only : initialize_masks, set_grid_metrics
 use MOM_restart, only : restore_state, is_new_run, MOM_restart_CS
 use MOM_restart, only : restart_registry_lock
 use MOM_sponge, only : set_up_sponge_field, set_up_sponge_ML_density
-use MOM_sponge, only : initialize_sponge, sponge_CS
+use MOM_sponge, only : initialize_sponge, initialize_layer_uv_sponge, sponge_CS
 use MOM_ALE_sponge, only : set_up_ALE_sponge_field, set_up_ALE_sponge_vel_field
 use MOM_ALE_sponge, only : ALE_sponge_CS, initialize_ALE_sponge
 use MOM_string_functions, only : uppercase, lowercase
@@ -2096,6 +2096,21 @@ subroutine initialize_sponges_file(G, GV, US, use_temperature, tv, u, v, depth_t
       call set_up_sponge_field(tmp, tv%S, G, GV, nz, Layer_CSp)
     endif
 
+! (CLPW
+      if (sponge_uv) then
+        filename = trim(inputdir)//trim(state_uv_file)
+        call log_param(param_file, mdl, "INPUTDIR/SPONGE_STATE_UV_FILE", filename)
+        if (.not.file_exists(filename, G%Domain)) &
+             call MOM_error(FATAL, " initialize_sponges: Unable to open "//trim(filename))
+        allocate(tmp_u(G%IsdB:G%IedB,jsd:jed,nz))
+        allocate(tmp_v(isd:ied,G%JsdB:G%JedB,nz))
+        call MOM_read_vector(filename, u_var, v_var, tmp_u(:,:,:), tmp_v(:,:,:), G%Domain, scale=US%m_s_to_L_T)
+        call initialize_layer_uv_sponge(Idamp_u, Idamp_v, tmp_u, tmp_v, G, param_file, Layer_CSp, GV)
+        deallocate(tmp_u,tmp_v)        
+      endif
+! CLPW)
+
+
 !  else
     ! Initialize sponges without supplying sponge grid
 !    if (sponge_uv) then
@@ -2104,6 +2119,7 @@ subroutine initialize_sponges_file(G, GV, US, use_temperature, tv, u, v, depth_t
 !      call initialize_ALE_sponge(Idamp, G, GV, param_file, ALE_CSp)
 !    endif
   endif
+
 
 
   if  (use_ALE) then ! ALE mode
@@ -2174,9 +2190,10 @@ subroutine initialize_sponges_file(G, GV, US, use_temperature, tv, u, v, depth_t
     endif
   endif
 
-  if (sponge_uv .and. .not. use_ALE) call MOM_error(FATAL,'initialize_sponges_file: '// &
-                       'UV damping to target values only available in ALE mode')
-
+! (CLPW
+!  if (sponge_uv .and. .not. use_ALE) call MOM_error(FATAL,'initialize_sponges_file: '// &
+!                       'UV damping to target values only available in ALE mode')
+! CLPW)
 
   contains
 

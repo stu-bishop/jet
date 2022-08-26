@@ -22,6 +22,7 @@ implicit none ; private
 
 public set_up_sponge_field, set_up_sponge_ML_density
 public initialize_sponge, apply_sponge, sponge_end, init_sponge_diags
+public initialize_layer_uv_sponge, apply_layer_uv_sponge
 
 ! A note on unit descriptions in comments: MOM6 uses units that can be rescaled for dimensional
 ! consistency testing. These are noted in comments with units like Z, H, L, and T, along with
@@ -48,10 +49,17 @@ type, public :: sponge_CS ; private
   integer, pointer :: col_i(:) => NULL() !< Array of the i-indicies of each of the columns being damped.
   integer, pointer :: col_j(:) => NULL() !< Array of the j-indicies of each of the columns being damped.
   real, pointer :: Iresttime_col(:) => NULL() !< The inverse restoring time of each column [T-1 ~> s-1].
+  logical :: do_layer_uv_sponge !< If true, apply sponges to velocity fields.
+  real, pointer :: Iresttime_u(:,:) => NULL() !< 2D inverse restoring time for u velocity [T-1 ~> s-1].
+  real, pointer :: Iresttime_v(:,:) => NULL() !< 2D inverse restoring time for v velocity [T-1 ~> s-1].
   real, pointer :: Rcv_ml_ref(:) => NULL() !< The value toward which the mixed layer
                              !! coordinate-density is being damped [R ~> kg m-3].
   real, pointer :: Ref_eta(:,:) => NULL() !< The value toward which the interface
                              !! heights are being damped [Z ~> m].
+  real, pointer :: Ref_uvel(:,:,:) => NULL() !< The value toward which the zonal velocity
+                             !! is being damped (3D field).
+  real, pointer :: Ref_vvel(:,:,:) => NULL() !< The value toward which the meridional velocity
+                             !! is being damped (3D field).
   type(p3d) :: var(MAX_FIELDS_) !< Pointers to the fields that are being damped.
   type(p2d) :: Ref_val(MAX_FIELDS_) !< The values to which the fields are damped.
 
@@ -68,6 +76,12 @@ type, public :: sponge_CS ; private
   type(diag_ctrl), pointer :: diag => NULL() !< A structure that is used to
                              !! regulate the timing of diagnostic output.
   integer :: id_w_sponge = -1 !< A diagnostic ID
+  integer :: id_Iresttime_u_sponge = -1 !< A diagnostic ID
+  integer :: id_Iresttime_v_sponge = -1 !< A diagnostic ID
+  integer :: id_Ref_uvel_sponge = -1 !< A diagnostic ID
+  integer :: id_Ref_vvel_sponge = -1 !< A diagnostic ID
+  integer :: id_uvel_tend_sponge = -1 !< A diagnostic ID
+  integer :: id_vvel_tend_sponge = -1 !< A diagnostic ID
 end type sponge_CS
 
 contains
@@ -177,6 +191,56 @@ subroutine initialize_sponge(Iresttime, int_height, G, param_file, CS, GV, &
 
 end subroutine initialize_sponge
 
+
+subroutine initialize_layer_uv_sponge(Iresttime_u, Iresttime_v, uvel, vvel, G, param_file, CS, GV)
+  type(ocean_grid_type),   intent(in) :: G          !< The ocean's grid structure
+  type(verticalGrid_type), intent(in) :: GV         !< The ocean's vertical grid structure
+  real, dimension(SZIB_(G),SZJ_(G)), &
+                           intent(in) :: Iresttime_u  !< The inverse of the restoring time for u [T-1 ~> s-1].
+  real, dimension(SZI_(G),SZJB_(G)), &
+                           intent(in) :: Iresttime_v  !< The inverse of the restoring time for v [T-1 ~> s-1].
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), &
+                           intent(in) :: uvel !< Velocity to damp back toward [Z ~> m].
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), &
+                           intent(in) :: vvel !< Velocity to damp back toward [Z ~> m].
+  type(param_file_type),   intent(in) :: param_file !< A structure to parse for run-time parameters
+  type(sponge_CS),         pointer    :: CS         !< A pointer that is set to point to the control
+                                                    !! structure for this module
+
+
+  ! This include declares and sets the variable "version".
+# include "version_variable.h"
+  character(len=40)  :: mdl = "MOM_sponge"  ! This module's name.
+  logical :: use_sponge_uv
+  integer :: i, j, k, is, ie, js, je, nz
+  integer :: isd, ied, jsd, jed
+
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+  isd = G%isd ; ied = G%ied ; jsd = G%jsd ; jed = G%jed
+  
+  if (.not.associated(CS)) then
+    call MOM_error(WARNING, "initialize_layer_uv_sponge called with an unassociated "// &
+                            "control structure.")
+    return
+  endif
+
+! Set default, read and log parameters
+  call log_version(param_file, mdl, version)
+  call get_param(param_file, mdl, "SPONGE_UV", use_sponge_uv, &
+                 "Apply sponges in u and v, in addition to tracers.", &
+                 default=.false.)
+
+  if (.not.use_sponge_uv) return
+  CS%do_layer_uv_sponge = use_sponge_uv
+
+
+  allocate(CS%Iresttime_u(G%IsdB:G%IedB,jsd:jed), source=Iresttime_u)
+  allocate(CS%Iresttime_v(isd:ied,G%JsdB:G%JedB), source=Iresttime_v)
+  allocate(CS%Ref_uvel(G%IsdB:G%IedB,jsd:jed,nz), source=uvel)
+  allocate(CS%Ref_vvel(isd:ied,G%JsdB:G%JedB,nz), source=vvel)
+end subroutine initialize_layer_uv_sponge
+
+
 !> This subroutine sets up diagnostics for the sponges.  It is separate
 !! from initialize_sponge because it requires fields that are not readily
 !! available where initialize_sponge is called.
@@ -194,7 +258,21 @@ subroutine init_sponge_diags(Time, G, GV, US, diag, CS)
   CS%diag => diag
   CS%id_w_sponge = register_diag_field('ocean_model', 'w_sponge', diag%axesTi, &
       Time, 'The diapycnal motion due to the sponges', 'm s-1', conversion=GV%H_to_m*US%s_to_T)
+      
+  CS%id_Iresttime_u_sponge = register_diag_field('ocean_model', 'u_idamp_sponge', diag%axesCu1, &
+      Time, 'Uvel damping rate for sponge', 's-1', conversion=US%s_to_T)
+  CS%id_Iresttime_v_sponge = register_diag_field('ocean_model', 'v_idamp_sponge', diag%axesCv1, &
+      Time, 'Vvel damping rate for sponge', 's-1', conversion=US%s_to_T)
+  CS%id_Ref_uvel_sponge = register_diag_field('ocean_model', 'u_ref_sponge', diag%axesCuL, &
+      Time, 'Uvel damping target for sponge', 'm s-1', conversion=GV%H_to_m*US%s_to_T)
+  CS%id_Ref_vvel_sponge = register_diag_field('ocean_model', 'v_ref_sponge', diag%axesCvL, &
+      Time, 'Vvel damping target for sponge', 'm s-1', conversion=GV%H_to_m*US%s_to_T)
 
+  CS%id_uvel_tend_sponge = register_diag_field('ocean_model', 'u_tend_sponge', diag%axesCuL, &
+      Time, 'Uvel tendency due to sponge', 'm s-2', conversion=GV%H_to_m*US%s_to_T*US%s_to_T)
+  CS%id_vvel_tend_sponge = register_diag_field('ocean_model', 'v_tend_sponge', diag%axesCvL, &
+      Time, 'Vvel tendency due to sponge', 'm s-2', conversion=GV%H_to_m*US%s_to_T*US%s_to_T)
+      
 end subroutine init_sponge_diags
 
 !> This subroutine stores the reference profile for the variable whose
@@ -564,6 +642,72 @@ subroutine apply_sponge(h, dt, G, GV, US, ea, eb, CS, Rcv_ml)
 
 end subroutine apply_sponge
 
+!> This subroutine applies damping to the layers velocity
+subroutine apply_layer_uv_sponge(u, v, diffu, diffv, G, GV, US, CS)
+  type(ocean_grid_type),   intent(in)    :: G   !< The ocean's grid structure
+  type(verticalGrid_type), intent(in)    :: GV  !< The ocean's vertical grid structure
+  type(unit_scale_type),   intent(in)    :: US  !< A dimensional unit scaling type
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), &
+                           intent(in)    :: u   !< zonal velocity [L T-1 ~> m s-1]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), &
+                           intent(in)    :: v   !< meridional velocity [L T-1 ~> m s-1]
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), &
+                           intent(inout) :: diffu  !< An array with the viscous tendency of u [L T-2 ~> m s-2]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), &
+                           intent(inout) :: diffv  !< An array with the viscous tendency of v [L T-2 ~> m s-2]
+  type(sponge_CS),         pointer       :: CS  !< A pointer to the control structure for this module
+                                                !! that is set by a previous call to initialize_sponge.
+
+  ! Local variables
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)) :: tendu
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)) :: tendv
+  integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
+  Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
+
+  if (.not.associated(CS)) return
+  
+  if (.not.CS%do_layer_uv_sponge) return
+  
+  tendu(:,:,:) = 0.0
+  tendv(:,:,:) = 0.0
+  
+  do k=1,nz  
+    do j=js,je ; do I=Isq,Ieq
+      tendu(I,j,k) = CS%Iresttime_u(I,j) * (CS%Ref_uvel(I,j,k) - u(I,j,k))
+      diffu(I,j,k) = diffu(I,j,k) + tendu(I,j,k)
+    enddo ; enddo
+
+    do J=Jsq,Jeq ; do i=is,ie
+      tendv(i,J,k) = CS%Iresttime_v(i,J) * (CS%Ref_vvel(i,J,k) - v(i,J,k))
+      diffv(i,J,k) = diffv(i,J,k) + tendv(i,J,k)
+    enddo ; enddo
+  enddo
+
+  if (associated(CS%diag)) then ; if (query_averaging_enabled(CS%diag)) then
+    if (CS%id_Iresttime_u_sponge > 0) then
+      call post_data(CS%id_Iresttime_u_sponge, CS%Iresttime_u(:,:), CS%diag)
+    endif
+    if (CS%id_Iresttime_v_sponge > 0) then
+      call post_data(CS%id_Iresttime_v_sponge, CS%Iresttime_v(:,:), CS%diag)
+    endif
+    if (CS%id_Ref_uvel_sponge > 0) then
+      call post_data(CS%id_Ref_uvel_sponge, CS%Ref_uvel(:,:,:), CS%diag)
+    endif
+    if (CS%id_Ref_vvel_sponge > 0) then
+      call post_data(CS%id_Ref_vvel_sponge, CS%Ref_vvel(:,:,:), CS%diag)
+    endif
+    if (CS%id_uvel_tend_sponge > 0) then
+      call post_data(CS%id_uvel_tend_sponge, tendu(:,:,:), CS%diag)
+    endif
+    if (CS%id_vvel_tend_sponge > 0) then
+      call post_data(CS%id_vvel_tend_sponge, tendv(:,:,:), CS%diag)
+    endif
+  endif ; endif
+
+end subroutine apply_layer_uv_sponge
+
+
 !> This call deallocates any memory in the sponge control structure.
 subroutine sponge_end(CS)
   type(sponge_CS),         pointer    :: CS   !< A pointer to the control structure for this module
@@ -588,6 +732,11 @@ subroutine sponge_end(CS)
     if (associated(CS%Ref_val_im(CS%fldno)%p)) &
       deallocate(CS%Ref_val_im(CS%fldno)%p)
   enddo
+  
+  if (associated(CS%Iresttime_u)) deallocate(CS%Iresttime_u)
+  if (associated(CS%Iresttime_v)) deallocate(CS%Iresttime_v)
+  if (associated(CS%Ref_uvel)) deallocate(CS%Ref_uvel)
+  if (associated(CS%Ref_uvel)) deallocate(CS%Ref_uvel)
 
   deallocate(CS)
 
