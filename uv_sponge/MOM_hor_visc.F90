@@ -179,6 +179,28 @@ type, public :: hor_visc_CS ; private
     Biharm_const2_xy, & !< Biharmonic metric-dependent constants [T L4 ~> s m4]
     Re_Ah_const_xy      !< Biharmonic metric-dependent constants [L3 ~> m3]
 
+! (CLPW
+  ! UV sponge variables
+  logical do_layer_uv_sponge = .false.
+  real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_) :: &
+    Idamp_u     !< Damping rate at u points [T-1 ~> s-1]
+
+  real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_,NKMEM_) :: &
+    Ref_uvel     !< The value toward which the zonal velocity is being damped (3D field).
+
+  real ALLOCABLE_, dimension(NIMEM_,NJMEMB_PTR_) :: &
+    Idamp_v     !< Damping rate at v points [T-1 ~> s-1]
+    
+  real ALLOCABLE_, dimension(NIMEM_,NJMEMB_PTR_,NKMEM_) :: &
+    Ref_vvel     !< The value toward which the meridional velocity is being damped (3D field).
+  integer :: id_Iresttime_u_sponge = -1 !< A diagnostic ID
+  integer :: id_Iresttime_v_sponge = -1 !< A diagnostic ID
+  integer :: id_Ref_uvel_sponge = -1    !< A diagnostic ID
+  integer :: id_Ref_vvel_sponge = -1    !< A diagnostic ID
+  integer :: id_uvel_tend_sponge = -1   !< A diagnostic ID
+  integer :: id_vvel_tend_sponge = -1   !< A diagnostic ID
+! CLPW)
+    
   type(diag_ctrl), pointer :: diag => NULL() !< structure to regulate diagnostics
 
   ! real, allocatable :: hf_diffu(:,:,:)  ! Zonal hor. visc. accel. x fract. thickness [L T-2 ~> m s-2].
@@ -380,6 +402,11 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
     vert_vort_mag, &  ! magnitude of the vertical vorticity gradient (h or q) [L-1 T-1 ~> m-1 s-1]
     hrat_min, &     ! h_min divided by the thickness at the stress point (h or q) [nondim]
     visc_bound_rem  ! fraction of overall viscous bounds that remain to be applied (h or q) [nondim]
+
+! (CLPW
+  real, dimension(SZIB_(G), SZJ_(G), SZK_(GV)) :: tendu
+  real, dimension(SZI_(G), SZJB_(G), SZK_(GV)) :: tendv
+! CLPW)
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
@@ -1456,6 +1483,15 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
                      G%IareaCu(I,j)) / (h_u(I,j) + h_neglect)
     enddo ; enddo
 
+! (CLPW
+    if (CS%do_layer_uv_sponge) then
+      do j=js,je ; do I=Isq,Ieq
+        tendu(I,j,k) = CS%Iresttime_u(I,j) * (CS%Ref_uvel(I,j,k) - u(I,j,k))
+        diffu(I,j,k) = diffu(I,j,k) + tendu(I,j,k)
+      enddo ; enddo
+    endif
+! CLPW)
+
     if (apply_OBC) then
       ! This is not the right boundary condition. If all the masking of tendencies are done
       ! correctly later then eliminating this block should not change answers.
@@ -1476,6 +1512,16 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
                      G%IareaCv(i,J)) / (h_v(i,J) + h_neglect)
     enddo ; enddo
 
+! (CLPW
+    if (CS%do_layer_uv_sponge) then
+      do J=Jsq,Jeq ; do i=is,ie
+        tendv(i,J,k) = CS%Iresttime_v(i,J) * (CS%Ref_vvel(i,J,k) - v(i,J,k))
+        diffv(i,J,k) = diffv(i,J,k) + tendv(i,J,k)
+      enddo ; enddo
+    endif
+! CLPW)
+    
+    
     if (apply_OBC) then
       ! This is not the right boundary condition. If all the masking of tendencies are done
       ! correctly later then eliminating this block should not change answers.
@@ -1669,6 +1715,17 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
     if (CS%id_diffv_visc_rem > 0) call post_product_v(CS%id_diffv_visc_rem, diffv, ADp%visc_rem_v, G, nz, CS%diag)
   endif
 
+! (CLPW
+  if (CS%do_layer_uv_sponge) then
+    if (CS%id_Iresttime_u_sponge > 0) call post_data(CS%id_Iresttime_u_sponge, CS%Iresttime_u(:,:), CS%diag)
+    if (CS%id_Iresttime_v_sponge > 0) call post_data(CS%id_Iresttime_v_sponge, CS%Iresttime_v(:,:), CS%diag)
+    if (CS%id_Ref_uvel_sponge > 0)    call post_data(CS%id_Ref_uvel_sponge, CS%Ref_uvel(:,:,:), CS%diag)
+    if (CS%id_Ref_vvel_sponge > 0)    call post_data(CS%id_Ref_vvel_sponge, CS%Ref_vvel(:,:,:), CS%diag)
+    if (CS%id_uvel_tend_sponge > 0)   call post_data(CS%id_uvel_tend_sponge, tendu(:,:,:), CS%diag)
+    if (CS%id_vvel_tend_sponge > 0)   call post_data(CS%id_vvel_tend_sponge, tendv(:,:,:), CS%diag)
+  endif
+! CLPW)
+
 end subroutine horizontal_viscosity
 
 !> Allocates space for and calculates static variables used by horizontal_viscosity().
@@ -1735,6 +1792,11 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   real    :: slat_fn       ! sin(lat)**Kh_pwr_of_sine
   real    :: aniso_grid_dir(2) ! Vector (n1,n2) for anisotropic direction
   integer :: aniso_mode    ! Selects the mode for setting the anisotropic direction
+! (CLPW
+  logical :: sponge_uv     ! Whether to use UV sponges
+  character(len=200) :: uv_damping_file, state_uv_file  ! Strings for filenames
+  character(len=40) :: u_var, v_var, Idamp_u_var, Idamp_v_var
+! CLPW)
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: isd, ied, jsd, jed, IsdB, IedB, JsdB, JedB
   integer :: i, j
@@ -2006,6 +2068,58 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
                    "The absolute maximum value the GME coefficient is allowed to take.", &
                    units="m2 s-1", scale=US%m_to_L**2*US%T_to_s, default=1.0e7)
   endif
+  
+! (CLPW --- Stuff related to the UV sponge
+  call get_param(param_file, mdl, "SPONGE_UV", sponge_uv, &
+                 "Apply sponges in u and v, in addition to tracers.", &
+                 default=.false.)
+                 
+  CS%do_layer_uv_sponge = sponge_uv
+  if (sponge_uv) then
+    call get_param(param_file, mdl, "SPONGE_UV_STATE_FILE", state_uv_file, &
+                 "The name of the file with the state to damp UV toward.", &
+                 default=damping_file)
+    call get_param(param_file, mdl, "SPONGE_U_VAR", u_var, &
+                 "The name of the zonal velocity variable in "//&
+                 "SPONGE_UV_STATE_FILE.", default="UVEL")
+    call get_param(param_file, mdl, "SPONGE_V_VAR", v_var, &
+                 "The name of the vertical velocity variable in "//&
+                 "SPONGE_UV_STATE_FILE.", default="VVEL")
+    
+    
+    call get_param(param_file, mdl, "INPUTDIR", inputdir, default=".")
+    inputdir = slasher(inputdir)
+    filename = trim(inputdir)//trim(uv_damping_file)
+    call log_param(param_file, mdl, "INPUTDIR/SPONGE_UV_DAMPING_FILE", filename)
+
+    if (.not.file_exists(filename, G%Domain)) &
+      call MOM_error(FATAL, " initialize_sponges: Unable to open "//trim(filename))
+
+    ALLOC_(CS%Idamp_u(SZIB_(G),SZJ_(G)))     ; CS%Idamp_u(:,:) = 0.0
+    ALLOC_(CS%Idamp_v(SZJ_(G),SIZB_(G)))     ; CS%Idamp_v(:,:) = 0.0
+
+    call MOM_read_vector(filename, Idamp_u_var,Idamp_v_var,CS%Idamp_u(:,:),CS%Idamp_v(:,:), & 
+                         G%Domain, scale=US%T_to_s)
+                         
+    ! These calls might not be necessary since we never use values in the halos
+    call pass_var(CS%Idamp_u, G%domain)
+    call pass_var(CS%Idamp_v, G%domain)
+
+    filename = trim(inputdir)//trim(state_uv_file)
+    call log_param(param_file, mdl, "INPUTDIR/SPONGE_STATE_UV_FILE", filename)
+    if (.not.file_exists(filename, G%Domain)) &
+         call MOM_error(FATAL, " initialize_sponges: Unable to open "//trim(filename))
+         
+    ALLOC_(CS%Ref_uvel(SZIB_(G),SZJ_(G),SZK_(G)))     ; CS%Ref_uvel(:,:) = 0.0
+    ALLOC_(CS%Ref_vvel(SZI_(G),SZJB_(G),SZK_(G)))     ; CS%Ref_vvel(:,:) = 0.0
+    call MOM_read_vector(filename, u_var, v_var, CS%Ref_uvel(:,:,:), CS%Ref_vvel(:,:,:), &
+                         G%Domain, scale=US%m_s_to_L_T)
+                         
+    ! These calls might not be necessary since we never use values in the halos
+    call pass_var(CS%Ref_uvel, G%domain)
+    call pass_var(CS%Ref_vvel, G%domain)
+  endif ! sponge_uv
+! CLPW)  
 
   if (CS%Laplacian .or. CS%biharmonic) then
     call get_param(param_file, mdl, "DT", dt, &
@@ -2519,6 +2633,24 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
       cmor_long_name='Depth integrated ocean kinetic energy dissipation due to lateral friction',&
       cmor_standard_name='ocean_kinetic_energy_dissipation_per_unit_area_due_to_xy_friction')
 
+! (CLPW
+  if (CS%do_do_layer_uv_sponge) then
+    CS%id_Iresttime_u_sponge = register_diag_field('ocean_model', 'u_idamp_sponge', diag%axesCu1, &
+        Time, 'Uvel damping rate for sponge', 's-1', conversion=US%s_to_T)
+    CS%id_Iresttime_v_sponge = register_diag_field('ocean_model', 'v_idamp_sponge', diag%axesCv1, &
+        Time, 'Vvel damping rate for sponge', 's-1', conversion=US%s_to_T)
+    CS%id_Ref_uvel_sponge = register_diag_field('ocean_model', 'u_ref_sponge', diag%axesCuL, &
+        Time, 'Uvel damping target for sponge', 'm s-1', conversion=GV%H_to_m*US%s_to_T)
+    CS%id_Ref_vvel_sponge = register_diag_field('ocean_model', 'v_ref_sponge', diag%axesCvL, &
+        Time, 'Vvel damping target for sponge', 'm s-1', conversion=GV%H_to_m*US%s_to_T)
+
+    CS%id_uvel_tend_sponge = register_diag_field('ocean_model', 'u_tend_sponge', diag%axesCuL, &
+        Time, 'Uvel tendency due to sponge', 'm s-2', conversion=GV%H_to_m*US%s_to_T*US%s_to_T)
+    CS%id_vvel_tend_sponge = register_diag_field('ocean_model', 'v_tend_sponge', diag%axesCvL, &
+        Time, 'Vvel tendency due to sponge', 'm s-2', conversion=GV%H_to_m*US%s_to_T*US%s_to_T)
+  endif
+! CLPW)
+
 end subroutine hor_visc_init
 
 !> Calculates factors in the anisotropic orientation tensor to be align with the grid.
@@ -2656,6 +2788,16 @@ subroutine hor_visc_end(CS)
     DEALLOC_(CS%n1n1_m_n2n2_h)
     DEALLOC_(CS%n1n1_m_n2n2_q)
   endif
+  
+! (CLPW
+  if (CS%do_layer_uv_sponge) then
+    DEALLOC_(CS%Idamp_u)
+    DEALLOC_(CS%Idamp_v)
+    DEALLOC_(CS%Ref_uvel)
+    DEALLOC_(CS%Ref_vvel)
+  endif
+! CLPW)
+  
 end subroutine hor_visc_end
 !> \namespace mom_hor_visc
 !!
