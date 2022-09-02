@@ -8,15 +8,21 @@ use MOM_diag_mediator,         only : post_data, register_diag_field, safe_alloc
 use MOM_diag_mediator,         only : post_product_u, post_product_sum_u
 use MOM_diag_mediator,         only : post_product_v, post_product_sum_v
 use MOM_diag_mediator,         only : diag_ctrl, time_type
+! (CLPW
+use MOM_diag_mediator,         only : register_static_field
+! CLPW)
 use MOM_domains,               only : pass_var, CORNER, pass_vector, AGRID, BGRID_NE
 use MOM_domains,               only : To_All, Scalar_Pair
 use MOM_error_handler,         only : MOM_error, FATAL, WARNING, is_root_pe
-use MOM_file_parser,           only : get_param, log_version, param_file_type
+! (CLPW
+use MOM_error_handler,         only : callTree_enter, callTree_leave, callTree_waypoint
+! CLPW)
+use MOM_file_parser,           only : get_param, log_version, param_file_type, log_param
 use MOM_grid,                  only : ocean_grid_type
 use MOM_lateral_mixing_coeffs, only : VarMix_CS, calc_QG_Leith_viscosity
 use MOM_barotropic,            only : barotropic_CS, barotropic_get_tav
 use MOM_thickness_diffuse,     only : thickness_diffuse_CS, thickness_diffuse_get_KH
-use MOM_io,                    only : MOM_read_data, slasher
+use MOM_io,                    only : MOM_read_data, slasher, file_exists, MOM_read_vector
 use MOM_MEKE_types,            only : MEKE_type
 use MOM_open_boundary,         only : ocean_OBC_type, OBC_DIRECTION_E, OBC_DIRECTION_W
 use MOM_open_boundary,         only : OBC_DIRECTION_N, OBC_DIRECTION_S, OBC_NONE
@@ -181,7 +187,7 @@ type, public :: hor_visc_CS ; private
 
 ! (CLPW
   ! UV sponge variables
-  logical do_layer_uv_sponge = .false.
+  logical :: do_layer_uv_sponge = .false.
   real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_) :: &
     Idamp_u     !< Damping rate at u points [T-1 ~> s-1]
 
@@ -193,12 +199,11 @@ type, public :: hor_visc_CS ; private
     
   real ALLOCABLE_, dimension(NIMEM_,NJMEMB_PTR_,NKMEM_) :: &
     Ref_vvel     !< The value toward which the meridional velocity is being damped (3D field).
-  integer :: id_Iresttime_u_sponge = -1 !< A diagnostic ID
-  integer :: id_Iresttime_v_sponge = -1 !< A diagnostic ID
-  integer :: id_Ref_uvel_sponge = -1    !< A diagnostic ID
-  integer :: id_Ref_vvel_sponge = -1    !< A diagnostic ID
+    
   integer :: id_uvel_tend_sponge = -1   !< A diagnostic ID
   integer :: id_vvel_tend_sponge = -1   !< A diagnostic ID
+  integer :: id_Ref_uvel_sponge = -1   !< A diagnostic ID
+  integer :: id_Ref_vvel_sponge = -1   !< A diagnostic ID
 ! CLPW)
     
   type(diag_ctrl), pointer :: diag => NULL() !< structure to regulate diagnostics
@@ -1486,7 +1491,7 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
 ! (CLPW
     if (CS%do_layer_uv_sponge) then
       do j=js,je ; do I=Isq,Ieq
-        tendu(I,j,k) = CS%Iresttime_u(I,j) * (CS%Ref_uvel(I,j,k) - u(I,j,k))
+        tendu(I,j,k) = CS%Idamp_u(I,j) * (CS%Ref_uvel(I,j,k) - u(I,j,k))
         diffu(I,j,k) = diffu(I,j,k) + tendu(I,j,k)
       enddo ; enddo
     endif
@@ -1515,7 +1520,7 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
 ! (CLPW
     if (CS%do_layer_uv_sponge) then
       do J=Jsq,Jeq ; do i=is,ie
-        tendv(i,J,k) = CS%Iresttime_v(i,J) * (CS%Ref_vvel(i,J,k) - v(i,J,k))
+        tendv(i,J,k) = CS%Idamp_v(i,J) * (CS%Ref_vvel(i,J,k) - v(i,J,k))
         diffv(i,J,k) = diffv(i,J,k) + tendv(i,J,k)
       enddo ; enddo
     endif
@@ -1717,8 +1722,6 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
 
 ! (CLPW
   if (CS%do_layer_uv_sponge) then
-    if (CS%id_Iresttime_u_sponge > 0) call post_data(CS%id_Iresttime_u_sponge, CS%Iresttime_u(:,:), CS%diag)
-    if (CS%id_Iresttime_v_sponge > 0) call post_data(CS%id_Iresttime_v_sponge, CS%Iresttime_v(:,:), CS%diag)
     if (CS%id_Ref_uvel_sponge > 0)    call post_data(CS%id_Ref_uvel_sponge, CS%Ref_uvel(:,:,:), CS%diag)
     if (CS%id_Ref_vvel_sponge > 0)    call post_data(CS%id_Ref_vvel_sponge, CS%Ref_vvel(:,:,:), CS%diag)
     if (CS%id_uvel_tend_sponge > 0)   call post_data(CS%id_uvel_tend_sponge, tendu(:,:,:), CS%diag)
@@ -1796,6 +1799,7 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   logical :: sponge_uv     ! Whether to use UV sponges
   character(len=200) :: uv_damping_file, state_uv_file  ! Strings for filenames
   character(len=40) :: u_var, v_var, Idamp_u_var, Idamp_v_var
+  integer :: id  ! a diagnostic id
 ! CLPW)
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: isd, ied, jsd, jed, IsdB, IedB, JsdB, JedB
@@ -1808,6 +1812,10 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   isd  = G%isd  ; ied  = G%ied  ; jsd  = G%jsd  ; jed  = G%jed
   IsdB = G%IsdB ; IedB = G%IedB ; JsdB = G%JsdB ; JedB = G%JedB
 
+! (CLPW
+  call callTree_enter(trim(mdl)//"(), MOM_hor_visc.F90")
+! CLPW)
+  
   CS%initialized = .true.
 
   CS%diag => diag
@@ -2071,22 +2079,30 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   
 ! (CLPW --- Stuff related to the UV sponge
   call get_param(param_file, mdl, "SPONGE_UV", sponge_uv, &
-                 "Apply sponges in u and v, in addition to tracers.", &
+                 "Apply sponges in u and v.", &
                  default=.false.)
                  
   CS%do_layer_uv_sponge = sponge_uv
   if (sponge_uv) then
+    call get_param(param_file, mdl, "SPONGE_UV_DAMPING_FILE", uv_damping_file, &
+                   "The name of the file with sponge damping rates for the velocity variables.", &
+                   default="uv_sponge.nc")
+    call get_param(param_file, mdl, "SPONGE_IDAMP_U_var", Idamp_u_var, &
+                   "The name of the inverse damping rate variable in "//&
+                   "SPONGE_UV_DAMPING_FILE for the zonal velocity.", default="Idamp_u")
+    call get_param(param_file, mdl, "SPONGE_IDAMP_V_var", Idamp_v_var, &
+                   "The name of the inverse damping rate variable in "//&
+                   "SPONGE_UV_DAMPING_FILE for the meridional velocity.", default="Idamp_v")
     call get_param(param_file, mdl, "SPONGE_UV_STATE_FILE", state_uv_file, &
                  "The name of the file with the state to damp UV toward.", &
-                 default=damping_file)
+                 default=uv_damping_file)
     call get_param(param_file, mdl, "SPONGE_U_VAR", u_var, &
                  "The name of the zonal velocity variable in "//&
                  "SPONGE_UV_STATE_FILE.", default="UVEL")
     call get_param(param_file, mdl, "SPONGE_V_VAR", v_var, &
                  "The name of the vertical velocity variable in "//&
                  "SPONGE_UV_STATE_FILE.", default="VVEL")
-    
-    
+       
     call get_param(param_file, mdl, "INPUTDIR", inputdir, default=".")
     inputdir = slasher(inputdir)
     filename = trim(inputdir)//trim(uv_damping_file)
@@ -2096,28 +2112,30 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
       call MOM_error(FATAL, " initialize_sponges: Unable to open "//trim(filename))
 
     ALLOC_(CS%Idamp_u(SZIB_(G),SZJ_(G)))     ; CS%Idamp_u(:,:) = 0.0
-    ALLOC_(CS%Idamp_v(SZJ_(G),SIZB_(G)))     ; CS%Idamp_v(:,:) = 0.0
+    ALLOC_(CS%Idamp_v(SZI_(G),SZJB_(G)))     ; CS%Idamp_v(:,:) = 0.0
 
     call MOM_read_vector(filename, Idamp_u_var,Idamp_v_var,CS%Idamp_u(:,:),CS%Idamp_v(:,:), & 
                          G%Domain, scale=US%T_to_s)
                          
     ! These calls might not be necessary since we never use values in the halos
-    call pass_var(CS%Idamp_u, G%domain)
-    call pass_var(CS%Idamp_v, G%domain)
+    ! This is incorrect since we should use pass_vector
+!     call pass_var(CS%Idamp_u, G%domain)
+!     call pass_var(CS%Idamp_v, G%domain)
 
     filename = trim(inputdir)//trim(state_uv_file)
     call log_param(param_file, mdl, "INPUTDIR/SPONGE_STATE_UV_FILE", filename)
     if (.not.file_exists(filename, G%Domain)) &
          call MOM_error(FATAL, " initialize_sponges: Unable to open "//trim(filename))
          
-    ALLOC_(CS%Ref_uvel(SZIB_(G),SZJ_(G),SZK_(G)))     ; CS%Ref_uvel(:,:) = 0.0
-    ALLOC_(CS%Ref_vvel(SZI_(G),SZJB_(G),SZK_(G)))     ; CS%Ref_vvel(:,:) = 0.0
+    ALLOC_(CS%Ref_uvel(SZIB_(G),SZJ_(G),SZK_(G)))     ; CS%Ref_uvel(:,:,:) = 0.0
+    ALLOC_(CS%Ref_vvel(SZI_(G),SZJB_(G),SZK_(G)))     ; CS%Ref_vvel(:,:,:) = 0.0
     call MOM_read_vector(filename, u_var, v_var, CS%Ref_uvel(:,:,:), CS%Ref_vvel(:,:,:), &
                          G%Domain, scale=US%m_s_to_L_T)
                          
     ! These calls might not be necessary since we never use values in the halos
-    call pass_var(CS%Ref_uvel, G%domain)
-    call pass_var(CS%Ref_vvel, G%domain)
+    ! This is incorrect since we should use pass_vector
+!     call pass_var(CS%Ref_uvel, G%domain)
+!     call pass_var(CS%Ref_vvel, G%domain)
   endif ! sponge_uv
 ! CLPW)  
 
@@ -2634,11 +2652,15 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
       cmor_standard_name='ocean_kinetic_energy_dissipation_per_unit_area_due_to_xy_friction')
 
 ! (CLPW
-  if (CS%do_do_layer_uv_sponge) then
-    CS%id_Iresttime_u_sponge = register_diag_field('ocean_model', 'u_idamp_sponge', diag%axesCu1, &
-        Time, 'Uvel damping rate for sponge', 's-1', conversion=US%s_to_T)
-    CS%id_Iresttime_v_sponge = register_diag_field('ocean_model', 'v_idamp_sponge', diag%axesCv1, &
-        Time, 'Vvel damping rate for sponge', 's-1', conversion=US%s_to_T)
+  if (CS%do_layer_uv_sponge) then
+    id = register_static_field('ocean_model', 'u_idamp_sponge', diag%axesCu1, &
+        'Uvel damping rate for sponge', 's-1', conversion=US%s_to_T)
+    if (id > 0) call post_data(id, CS%Idamp_u, diag, is_static=.true.)
+    
+    id = register_static_field('ocean_model', 'v_idamp_sponge', diag%axesCv1, &
+        'Vvel damping rate for sponge', 's-1', conversion=US%s_to_T)
+    if (id > 0) call post_data(id, CS%Idamp_v, diag, is_static=.true.)
+    
     CS%id_Ref_uvel_sponge = register_diag_field('ocean_model', 'u_ref_sponge', diag%axesCuL, &
         Time, 'Uvel damping target for sponge', 'm s-1', conversion=GV%H_to_m*US%s_to_T)
     CS%id_Ref_vvel_sponge = register_diag_field('ocean_model', 'v_ref_sponge', diag%axesCvL, &
@@ -2649,6 +2671,8 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
     CS%id_vvel_tend_sponge = register_diag_field('ocean_model', 'v_tend_sponge', diag%axesCvL, &
         Time, 'Vvel tendency due to sponge', 'm s-2', conversion=GV%H_to_m*US%s_to_T*US%s_to_T)
   endif
+  
+  call callTree_leave(trim(mdl)//"(), MOM_hor_visc.F90")
 ! CLPW)
 
 end subroutine hor_visc_init
