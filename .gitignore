@@ -1,0 +1,8 @@
+.DS_Store
+1layer
+2layer
+build
+__pycache__
+dask-worker-space
+*.pdf
+.ipynb_checkpoints
