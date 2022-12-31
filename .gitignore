@@ -4,3 +4,10 @@ __pycache__
 dask-worker-space
 *.pdf
 .ipynb_checkpoints
+*.nc
+*.pdf
+*.mp4
+*.out
+*.png
+*.res
+exitcode
