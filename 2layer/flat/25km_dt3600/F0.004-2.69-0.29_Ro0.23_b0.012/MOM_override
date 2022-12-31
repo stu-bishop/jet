@@ -1,0 +1,3 @@
+#override GINT = 0.015356275385277316    ! written by gendata.ipynb on 2022-09-06
+#override DAYMAX = 108000
+#override RESTINT = 3600

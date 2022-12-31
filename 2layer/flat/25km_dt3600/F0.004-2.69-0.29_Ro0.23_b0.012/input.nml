@@ -1,0 +1,20 @@
+ &MOM_input_nml
+         output_directory = 'OUTPUT',
+         input_filename = 'MOM.res.nc',
+         restart_input_dir = 'INPUT/',
+         restart_output_dir = 'RESTART/',
+         parameter_filename = 'MOM_input',
+                              'MOM_override' 
+/
+
+ &diag_manager_nml
+/
+ 
+ &fms_nml
+         domains_stack_size = 57600,
+/
+
+ &ocean_solo_nml
+            calendar = 'thirty_day_months',
+            days = 720,
+/

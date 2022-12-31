@@ -1,0 +1,6 @@
+#override GINT = 0.020525566303678321    ! written by gendata.ipynb on 2022-11-23
+#override AH_VEL_SCALE = 0.0
+#override SMAGORINSKY_AH = False
+#override AH = 2E09
+#override DAYMAX = 108000
+#override RESTINT = 3600
