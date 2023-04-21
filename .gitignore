@@ -11,3 +11,7 @@ dask-worker-space
 *.png
 *.res
 exitcode
+1layer
+2layer
+3layer
+
